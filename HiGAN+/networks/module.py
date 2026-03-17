@@ -77,8 +77,12 @@ class StyleEncoder(nn.Module):
             nn.LeakyReLU(),
         )
 
-        self.mu = nn.Linear(in_dim, style_dim)
-        self.logvar = nn.Linear(in_dim, style_dim)
+        self.mu_v = nn.Linear(in_dim, style_dim // 2)
+        self.mu_h = nn.Linear(in_dim, style_dim // 2)
+
+        self.logvar_v = nn.Linear(in_dim, style_dim // 2)
+        self.logvar_h = nn.Linear(in_dim, style_dim // 2)
+
         if init != 'none':
             init_weights(self, init)
 
@@ -88,10 +92,17 @@ class StyleEncoder(nn.Module):
         img_len_mask = _len2mask(img_len, feat.size(-1)).unsqueeze(1).float().detach()
         style = (feat * img_len_mask).sum(dim=-1) / (img_len.unsqueeze(1).float() + 1e-8)
         style = self.linear_style(style)
-        mu = self.mu(style)
+        mu_v = self.mu_v(style)
+        mu_h = self.mu_h(style)
+
+        mu = torch.cat([mu_v, mu_h], dim=1)
 
         if vae_mode:
-            logvar = self.logvar(style)
+            logvar_v = self.logvar_v(style)
+            logvar_h = self.logvar_h(style)
+
+            logvar = torch.cat([logvar_v, logvar_h], dim=1)
+
             style = self.reparameterize(mu, logvar)
             style = (style, mu, logvar)
         else:
@@ -235,4 +246,3 @@ class Recognizer(nn.Module):
             if classname.find('BatchNorm') != -1:
                 m.eval()
         self.apply(fix_bn)
-
