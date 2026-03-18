@@ -3,6 +3,7 @@ import torch
 from torch import nn
 from networks.block import Conv2dBlock, ActFirstResBlock, DeepBLSTM, DeepGRU, DeepLSTM, Identity
 from networks.utils import _len2mask, init_weights
+from .masking import StyleMasking
 
 
 class StyleBackbone(nn.Module):
@@ -66,6 +67,9 @@ class StyleEncoder(nn.Module):
         super(StyleEncoder, self).__init__()
         self.style_dim = style_dim
 
+        self.masking = StyleMasking()
+
+        # Shared MLP
         self.linear_style = nn.Sequential(
             nn.Linear(in_dim, in_dim),
             nn.LeakyReLU(),
@@ -73,53 +77,48 @@ class StyleEncoder(nn.Module):
             nn.LeakyReLU(),
         )
 
-        self.mu_v = nn.Linear(in_dim, style_dim // 2)
-        self.mu_h = nn.Linear(in_dim, style_dim // 2)
+        # Fusion layer (NEW)
+        self.fusion = nn.Sequential(
+            nn.Linear(in_dim * 3, in_dim),
+            nn.LeakyReLU(),
+        )
 
-        self.logvar_v = nn.Linear(in_dim, style_dim // 2)
-        self.logvar_h = nn.Linear(in_dim, style_dim // 2)
+        self.mu = nn.Linear(in_dim, style_dim)
+        self.logvar = nn.Linear(in_dim, style_dim)
 
         if init != 'none':
             init_weights(self, init)
 
+    def masked_pool(self, feat, img_len):
+        mask = _len2mask(img_len, feat.size(-1)).unsqueeze(1).float().detach()
+        return (feat * mask).sum(dim=-1) / (img_len.unsqueeze(1).float() + 1e-8)
+
     def forward(self, img, img_len, cnn_backbone=None, ret_feats=False, vae_mode=False):
         feat, all_feats = cnn_backbone(img, ret_feats)
-        # feat: (B, C, W)
 
         img_len = img_len // cnn_backbone.reduce_len_scale
-        img_len_mask = _len2mask(img_len, feat.size(-1)).unsqueeze(1).float().detach()
 
-        B, C, W = feat.shape
+        # ===== ORIGINAL GLOBAL STYLE =====
+        style_global = self.masked_pool(feat, img_len)
 
-        # mask theo chiều width
-        mask_line = (torch.rand(B, 1, W, device=feat.device) > 0.3).float()
-        mask_line = mask_line * img_len_mask
+        # ===== VERTICAL MASKING =====
+        feat_v = self.masking.vertical_mask(feat)
+        style_vertical = self.masked_pool(feat_v, img_len)
 
-        feat_v = feat * mask_line
-        feat_h = feat * (img_len_mask - mask_line)
+        # ===== HORIZONTAL MASKING =====
+        feat_h = self.masking.horizontal_mask(feat)
+        style_horizontal = self.masked_pool(feat_h, img_len)
 
-        len_v = mask_line.sum(dim=-1) + 1e-8
-        len_h = (img_len_mask - mask_line).sum(dim=-1) + 1e-8
+        # ===== FUSION =====
+        style = torch.cat([style_global, style_vertical, style_horizontal], dim=1)
+        style = self.fusion(style)
 
-        style_v_base = feat_v.sum(dim=-1) / len_v
-        style_h_base = feat_h.sum(dim=-1) / len_h
+        style = self.linear_style(style)
 
-        style_v = self.linear_style(style_v_base)
-        style_h = self.linear_style(style_h_base)
-
-        style_v = style_v + 0.01 * torch.randn_like(style_v)
-        style_h = style_h + 0.01 * torch.randn_like(style_h)
-
-        mu_v = self.mu_v(style_v)
-        mu_h = self.mu_h(style_h)
-
-        mu = 0.5 * (mu_v + mu_h)
+        mu = self.mu(style)
 
         if vae_mode:
-            logvar_v = self.logvar_v(style_v)
-            logvar_h = self.logvar_h(style_h)
-            logvar = logvar_v + logvar_h
-
+            logvar = self.logvar(style)
             style = self.reparameterize(mu, logvar)
             style = (style, mu, logvar)
         else:
@@ -135,7 +134,6 @@ class StyleEncoder(nn.Module):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return eps * std + mu
-
 
 class WriterIdentifier(nn.Module):
     def __init__(self, n_writer=372, in_dim=256, init='N02'):
