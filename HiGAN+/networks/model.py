@@ -359,7 +359,7 @@ class AdversarialModel(BaseModel):
         print('CER:{:.4f}  WER:{:.4f}'.format(cer, wer))
         return cer, wer
 
-    def validate_wid(self, generator, real_dloader, split='test'):
+    def validate_wid(self, , real_dloader, split='test'):
         if split == 'test':
             assert os.path.exists(self.opt.valid.pretrained_test_w)
             w_dict = torch.load(self.opt.valid.pretrained_test_w, self.device)
